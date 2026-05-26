@@ -111,7 +111,7 @@
           method: form.method || "POST",
           body: JSON.stringify(data),
           headers: {
-            "Content-Type": "text/plain",
+            "Content-Type": "application/json",
             Accept: "application/json",
           },
         });
