@@ -1,0 +1,149 @@
+# =============================================================
+# DataRegimen — Google Cloud Build pipeline
+# -----------------------------------------------------------------
+# Builds a container, pushes to Artifact Registry, and deploys to
+# Cloud Run. Substitution variables let you override defaults
+# from the trigger or `gcloud builds submit`.
+#
+# Required APIs (enable once per project):
+#   gcloud services enable \
+#     cloudbuild.googleapis.com \
+#     run.googleapis.com \
+#     artifactregistry.googleapis.com
+#
+# Required Artifact Registry repo (run once):
+#   gcloud artifacts repositories create dataregimen \
+#     --repository-format=docker \
+#     --location=us-central1 \
+#     --description="DataRegimen container images"
+#
+# Required IAM on Cloud Build SA (PROJECT_NUMBER@cloudbuild.gserviceaccount.com):
+#   - roles/run.admin
+#   - roles/iam.serviceAccountUser
+#   - roles/artifactregistry.writer
+#
+# Manual run:
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_SERVICE=dataregimen
+# =============================================================
+
+substitutions:
+  _REGION: "us-central1"
+  _REPO: "dataregimen"
+  _SERVICE: "dataregimen"
+  _PLATFORM: "managed"
+  _MEMORY: "256Mi"
+  _CPU: "1"
+  _MAX_INSTANCES: "10"
+  _MIN_INSTANCES: "0"
+  _CONCURRENCY: "80"
+  _ALLOW_UNAUTH: "true"
+
+# Pin a recent, fast machine for the build
+options:
+  machineType: "E2_HIGHCPU_8"
+  logging: CLOUD_LOGGING_ONLY
+  dynamic_substitutions: true
+
+steps:
+
+# ----------------------------------------------------------------
+# 1. Build the image (tag with both commit SHA and latest)
+# ----------------------------------------------------------------
+- id: build
+  name: "gcr.io/cloud-builders/docker"
+  args:
+    - "build"
+    - "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+    - "--tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+    - "--cache-from=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+    - "--label=git-sha=${SHORT_SHA}"
+    - "--label=build-id=${BUILD_ID}"
+    - "."
+
+# ----------------------------------------------------------------
+# 2. Push both tags to Artifact Registry
+# ----------------------------------------------------------------
+- id: push-sha
+  name: "gcr.io/cloud-builders/docker"
+  args:
+    - "push"
+    - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+  waitFor: ["build"]
+
+- id: push-latest
+  name: "gcr.io/cloud-builders/docker"
+  args:
+    - "push"
+    - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+  waitFor: ["build"]
+
+# ----------------------------------------------------------------
+# 3. Deploy to Cloud Run
+# ----------------------------------------------------------------
+- id: deploy
+  name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+  entrypoint: "bash"
+  args:
+    - "-c"
+    - |
+      set -e
+      AUTH_FLAG=""
+      if [ "${_ALLOW_UNAUTH}" = "true" ]; then
+        AUTH_FLAG="--allow-unauthenticated"
+      else
+        AUTH_FLAG="--no-allow-unauthenticated"
+      fi
+
+      gcloud run deploy ${_SERVICE} \
+        --image="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}" \
+        --region="${_REGION}" \
+        --platform="${_PLATFORM}" \
+        --port=8080 \
+        --memory="${_MEMORY}" \
+        --cpu="${_CPU}" \
+        --concurrency="${_CONCURRENCY}" \
+        --min-instances="${_MIN_INSTANCES}" \
+        --max-instances="${_MAX_INSTANCES}" \
+        --timeout=60 \
+        --execution-environment=gen2 \
+        --cpu-boost \
+        --ingress=all \
+        --set-labels="app=dataregimen,managed-by=cloudbuild,git-sha=${SHORT_SHA}" \
+        $AUTH_FLAG
+  waitFor: ["push-sha"]
+
+# ----------------------------------------------------------------
+# 4. Verify deployment
+# ----------------------------------------------------------------
+- id: verify
+  name: "gcr.io/google.com/cloudsdktool/cloud-sdk:slim"
+  entrypoint: "bash"
+  args:
+    - "-c"
+    - |
+      set -e
+      URL=$$(gcloud run services describe ${_SERVICE} \
+        --region=${_REGION} \
+        --platform=${_PLATFORM} \
+        --format="value(status.url)")
+      echo "Service URL: $$URL"
+      echo "Smoke testing /healthz..."
+      for i in 1 2 3 4 5; do
+        if curl -fsS "$$URL/healthz" >/dev/null; then
+          echo "Healthcheck passed."
+          exit 0
+        fi
+        echo "Attempt $$i failed, retrying..."
+        sleep 3
+      done
+      echo "Healthcheck failed after retries."
+      exit 1
+  waitFor: ["deploy"]
+
+# Tag the built images so they show up in Artifact Registry listings
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest"
+
+timeout: "1200s"

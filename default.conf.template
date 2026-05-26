@@ -1,0 +1,68 @@
+# =============================================================
+# DataRegimen — server block
+# Cloud Run injects PORT env var (default 8080). The base image's
+# entrypoint runs envsubst on /etc/nginx/templates/*.template
+# into /etc/nginx/conf.d/ before launching nginx.
+#
+# IMPORTANT: All add_header directives live ONLY in this server
+# block (not in any location). That's because nginx drops parent
+# add_headers as soon as a child block defines its own. By keeping
+# headers at one level, we get inheritance for free everywhere.
+# =============================================================
+
+server {
+    listen       ${PORT} default_server;
+    server_name  _;
+
+    root   /usr/share/nginx/html;
+    index  index.html;
+    charset utf-8;
+
+    # --- Cache-Control (varies by Content-Type via $cache_control map) ---
+    add_header Cache-Control $cache_control always;
+
+    # --- Security headers ---
+    add_header X-Content-Type-Options    "nosniff"                                                   always;
+    add_header X-Frame-Options           "SAMEORIGIN"                                                always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin"                           always;
+    add_header Permissions-Policy        "geolocation=(), microphone=(), camera=(), payment=()"     always;
+    add_header X-XSS-Protection          "0"                                                         always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains"                       always;
+    add_header Content-Security-Policy   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self' https://formspree.io; form-action 'self' https://formspree.io; frame-ancestors 'self'; base-uri 'self'; object-src 'none'; upgrade-insecure-requests" always;
+
+    # --- Healthcheck endpoint for Cloud Run / uptime probes ---
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # --- Static assets: routing only, headers inherited from server level ---
+    location ~* \.(?:css|js|svg|woff2?|ttf|otf|eot|ico|png|jpg|jpeg|webp|avif|gif)$ {
+        access_log off;
+        try_files $uri =404;
+    }
+
+    # --- robots / sitemap / manifest ---
+    location = /robots.txt   { access_log off; try_files $uri =404; }
+    location = /sitemap.xml  { access_log off; try_files $uri =404; }
+    location ~* \.webmanifest$ {
+        types { application/manifest+json webmanifest; }
+        try_files $uri =404;
+    }
+
+    # --- Main app: serve files; unknown paths → branded 404 page ---
+    location / {
+        try_files $uri $uri/ $uri.html =404;
+    }
+
+    # --- Custom 404 ---
+    error_page 404 /404.html;
+    location = /404.html {
+        internal;
+    }
+
+    # --- Block hidden files and common junk ---
+    location ~ /\. { deny all; access_log off; log_not_found off; }
+    location ~ ~$  { deny all; access_log off; log_not_found off; }
+}
