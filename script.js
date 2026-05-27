@@ -99,19 +99,11 @@
       setStatus("Sending your message…", null);
 
       try {
-        const formData = new FormData(form);
-        const data = {};
-        formData.forEach((value, key) => {
-          // Do not include the honey pot field in the sheets data if it's empty
-          if (key === "_gotcha" && !value) return;
-          data[key] = value;
-        });
-
+        const data = new FormData(form);
         const response = await fetch(form.action, {
           method: form.method || "POST",
-          body: JSON.stringify(data),
+          body: data,
           headers: {
-            "Content-Type": "application/json",
             Accept: "application/json",
           },
         });
